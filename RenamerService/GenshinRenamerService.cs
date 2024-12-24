@@ -28,6 +28,9 @@ namespace RenamerService {
         /// <summary>List of watchdogs that monitor any file addition or removal to the watched directories.</summary>
         private List<FileSystemWatcher> mFSWs;
 
+        /// <summary>List of pending files to rename.</summary>
+        private Queue<Tuple<string, string>> mPendingRenames;
+
         /// <summary>The regex to apply to screenshot files.</summary>
         private Regex mRegex;
 
@@ -43,9 +46,10 @@ namespace RenamerService {
         ///   These logs are visible through the Event Viewer system app.
         /// </param>
         public GenshinRenamerService(ILogger<GenshinRenamerService> logger) {
-            mLogger = logger;
-            mFSWs   = new List<FileSystemWatcher>(2);
-            mRegex  = new Regex(@"^(?<fname>.*)(?<day>\d{2})_(?<month>\d{2})_(?<year>\d{4})\s(?<hour>\d{2})_(?<minute>\d{2})_(?<second>\d{2})(?<ext>.*)$");
+            mLogger         = logger;
+            mFSWs           = new List<FileSystemWatcher>(2);
+            mRegex          = new Regex(@"^(?<fname>.*)(?<day>\d{2})_(?<month>\d{2})_(?<year>\d{4})\s(?<hour>\d{2})_(?<minute>\d{2})_(?<second>\d{2})(?<ext>.*)$");
+            mPendingRenames = new Queue<Tuple<string, string>>(4);
         }
 
         #endregion
@@ -64,12 +68,13 @@ namespace RenamerService {
             EnableFSWs();
             try { 
                 if (!stoppingToken.IsCancellationRequested) { 
-                    initialRenameTask = new Task(new Action<object?>(InitialRenameFiles), stoppingToken, stoppingToken);
+                    initialRenameTask = new Task(new Action<object?>(InitialRenameFilesAction), stoppingToken, stoppingToken);
                     initialRenameTask.Start();
                     await initialRenameTask;
                 }
                 while (!stoppingToken.IsCancellationRequested) {
-                    await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                    await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
+                    PeriodicRenameFilesAction();
                 }
             }
             catch (OperationCanceledException) {
@@ -166,15 +171,54 @@ namespace RenamerService {
         }
 
         /// <summary>
+        ///   Produce new file name as the rename target for <paramref name="OldFileName"/> if it matches the regex pattern. 
+        ///   If it doesn't match the regex pattern, this function returns <paramref name="OldFileName"/> unchanged.
+        /// </summary>
+        /// <param name="OldFileName">Old file name (not including the path) to check.</param>
+        /// <returns>
+        ///   - If <paramref name="OldFileName"/> matches the regex pattern and contains date information dd_mm_yyyy hh_mm_ss, this function returns the same file name but the date info is reversed to yyyy-mm-dd hh-mm-ss. <br/>
+        ///   - Otherwise, this returns <paramref name="OldFileName"/> unchanged.
+        /// </returns>
+        private string ProduceNewFileName(string OldFileName) {
+            string        fileNamePart, extensionPart, newFileName;
+            string        year, month, day, hour, minute, seconds;
+            Match         regexMatch;
+            StringBuilder sb;
+            const string HYPHEN = "-";
+            regexMatch = mRegex.Match(OldFileName);
+            if (regexMatch.Success) {
+                fileNamePart  = regexMatch.Groups["fname"].Value;
+                day           = regexMatch.Groups["day"].Value;
+                month         = regexMatch.Groups["month"].Value;
+                year          = regexMatch.Groups["year"].Value;
+                hour          = regexMatch.Groups["hour"].Value;
+                minute        = regexMatch.Groups["minute"].Value;
+                seconds       = regexMatch.Groups["second"].Value;
+                extensionPart = regexMatch.Groups["ext"].Value;
+                sb = new StringBuilder(64);
+                sb.Append(fileNamePart);
+                sb.Append(year);   sb.Append(HYPHEN);
+                sb.Append(month);  sb.Append(HYPHEN);
+                sb.Append(day);    sb.Append(" ");
+                sb.Append(hour);   sb.Append(HYPHEN);
+                sb.Append(minute); sb.Append(HYPHEN);
+                sb.Append(seconds);
+                sb.Append(extensionPart);
+                newFileName = sb.ToString();
+                sb.Clear();
+                return newFileName;
+            }
+            else
+                return OldFileName;
+        }
+
+        /// <summary>
         ///   Browses all watched folders and initially renames all eligible files manually.
         ///   This is executed before <see cref="FileSystemWatcher"/>s' monitoring starts.
         /// </summary>
         /// <param name="CancelTokenObj">A cancellation token that is triggered when <see cref="IHostedService.StopAsync(CancellationToken)"/> is called.</param>
-        private void InitialRenameFiles(object? CancelTokenObj) {
-            string        folderPath, fileName, fileNamePart, extensionPart, newFileName, newFilePath;
-            string        year, month, day, hour, minute, seconds;
-            Match         regexMatch;
-            StringBuilder sb = new StringBuilder(72);
+        private void InitialRenameFilesAction(object? CancelTokenObj) {
+            string        folderPath, oldFileName, oldFilePath, newFileName, newFilePath;
             int           i  = 0;
             DirectoryInfo dir;
             FileInfo      fi; 
@@ -182,7 +226,6 @@ namespace RenamerService {
             FileSystemWatcher      fsw;
             IEnumerable<FileInfo>  files;
             IEnumerator<FileInfo>? fileIterator;
-            const string HYPHEN = "-";
             if (CancelTokenObj is null) 
                 stoppingToken = CancellationToken.None;
             else
@@ -202,52 +245,37 @@ namespace RenamerService {
                         fileIterator = files.GetEnumerator();
                         while (fileIterator.MoveNext() && !stoppingToken.IsCancellationRequested) {
                             fi = fileIterator.Current;
-                            fileName = fi.Name;
-                            regexMatch = mRegex.Match(fileName);
-                            if (regexMatch.Success) {
-                                fileNamePart  = regexMatch.Groups["fname"].Value;
-                                day           = regexMatch.Groups["day"].Value;
-                                month         = regexMatch.Groups["month"].Value;
-                                year          = regexMatch.Groups["year"].Value;
-                                hour          = regexMatch.Groups["hour"].Value;
-                                minute        = regexMatch.Groups["minute"].Value;
-                                seconds       = regexMatch.Groups["second"].Value;
-                                extensionPart = regexMatch.Groups["ext"].Value;
-                                sb = new StringBuilder(64);
-                                sb.Append(fileNamePart);
-                                sb.Append(year);   sb.Append(HYPHEN);
-                                sb.Append(month);  sb.Append(HYPHEN);
-                                sb.Append(day);    sb.Append(" ");
-                                sb.Append(hour);   sb.Append(HYPHEN);
-                                sb.Append(minute); sb.Append(HYPHEN);
-                                sb.Append(seconds);
-                                sb.Append(extensionPart);
-                                newFileName = sb.ToString();
+                            oldFileName = fi.Name;
+                            newFileName = ProduceNewFileName(oldFileName);
+                            if (!string.Equals(oldFileName, newFileName)) {
                                 newFilePath = Path.Combine(folderPath, newFileName);
-                                sb.Clear();
                                 try {
                                     File.Move(fi.FullName, newFilePath);
-                                    mLogger.LogInformation("File '{0}' was renamed to '{1}'.", fileName, newFileName);
+                                    mLogger.LogInformation("File '{0}' was renamed to '{1}'.", oldFileName, newFileName);
                                 }
                                 catch (FileNotFoundException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. File not found.", fileName, newFileName);
+                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. File not found.", oldFileName, newFileName);
                                 }
                                 catch (DirectoryNotFoundException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Directory not found.", fileName, newFileName);
+                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Directory not found.", oldFileName, newFileName);
                                 }
                                 catch (PathTooLongException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", fileName, newFileName);
+                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", oldFileName, newFileName);
                                 }
                                 catch (IOException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", fileName, newFileName, ex.HResult, ex.Message);
+                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", oldFileName, newFileName, ex.HResult, ex.Message);
+                                    if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/) {
+                                        oldFilePath = Path.Combine(folderPath, oldFileName);
+                                        mPendingRenames.Enqueue(new Tuple<string, string>(oldFilePath, newFilePath));
+                                    }
                                 }
                                 catch (ArgumentException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", fileName, newFileName, ex.Message);
+                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", oldFileName, newFileName, ex.Message);
                                 }
                                 catch (UnauthorizedAccessException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Could not access the file (unauthorized).", fileName, newFileName);
+                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Could not access the file (unauthorized).", oldFileName, newFileName);
                                 }
-                            } //end if regexMatch.Success
+                            } //end if fileName != newFileName
                         } //end while fileIterator.MoveNext()
                     }
                     catch (InvalidOperationException) {
@@ -262,62 +290,90 @@ namespace RenamerService {
         }
         
         /// <summary>
+        ///   Periodically tries to rename the file in [<see cref="mPendingRenames"/>] because possibly this time other applications 
+        ///   have finished using these files, so they are now unlocked and can be renamed.
+        /// </summary>
+        private void PeriodicRenameFilesAction() {
+            int i;
+            Tuple<string, string> renameInstruction;
+            List<Tuple<string, string>> failedRenames = new List<Tuple<string, string>>(2);  //to try again next time
+            //execute pending renames in the queue
+            while (mPendingRenames.Count > 0) {
+                renameInstruction = mPendingRenames.Dequeue();
+                try {
+                    File.Move(renameInstruction.Item1, renameInstruction.Item2);
+                    mLogger.LogInformation("File '{0}' was renamed to '{1}'.", renameInstruction.Item1, renameInstruction.Item2);
+                }
+                catch (FileNotFoundException ex) {
+                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. File not found.", renameInstruction.Item1, renameInstruction.Item2);
+                }
+                catch (DirectoryNotFoundException ex) {
+                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Directory not found.", renameInstruction.Item1, renameInstruction.Item2);
+                }
+                catch (PathTooLongException ex) {
+                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", renameInstruction.Item1, renameInstruction.Item2);
+                }
+                catch (IOException ex) {
+                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", renameInstruction.Item1, renameInstruction.Item2, ex.HResult, ex.Message);
+                    if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/)
+                        failedRenames.Add(renameInstruction);
+                }
+                catch (ArgumentException ex) {
+                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", renameInstruction.Item1, renameInstruction.Item2, ex.Message);
+                }
+                catch (UnauthorizedAccessException ex) {
+                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Could not access the file (unauthorized).", renameInstruction.Item1, renameInstruction.Item2);
+                }
+            }
+            //re-enqueue failed renames to try again next time
+            if (failedRenames.Count > 0) {
+                i = 0;
+                while (i < failedRenames.Count) {
+                    renameInstruction = failedRenames[i];
+                    mPendingRenames.Enqueue(renameInstruction);
+                    ++i;
+                }
+            }
+        }
+
+        /// <summary>
         /// Event handler for [<see cref="FileSystemWatcher.Created"/>] event. Fires when a new file is added to the watched directory.
         /// </summary>
         /// <param name="sender">Reference to the <see cref="FileSystemWatcher"/> object that raised the event.</param>
         /// <param name="e">A <see cref="FileSystemEventArgs"/> that contains information about newly created file.</param>
         private void FSW_Created(object sender, FileSystemEventArgs e) {
-            string        folderPath, fileName, fileNamePart, extensionPart, newFileName, newFilePath;
-            string        year, month, day, hour, minute, seconds;
-            Match         regexMatch;
-            StringBuilder sb;
-            const string HYPHEN = "-";
+            string folderPath, oldFileName, oldFilePath, newFileName, newFilePath;
             if (e.ChangeType == WatcherChangeTypes.Created && !string.IsNullOrEmpty(e.FullPath) && e.FullPath.Length > 0) {
-                folderPath = Path.GetDirectoryName(e.FullPath) ?? string.Empty;
-                fileName   = Path.GetFileName(e.FullPath);
-                regexMatch = mRegex.Match(fileName);
-                if (regexMatch.Success) {
-                    fileNamePart  = regexMatch.Groups["fname"].Value;
-                    day           = regexMatch.Groups["day"].Value;
-                    month         = regexMatch.Groups["month"].Value;
-                    year          = regexMatch.Groups["year"].Value;
-                    hour          = regexMatch.Groups["hour"].Value;
-                    minute        = regexMatch.Groups["minute"].Value;
-                    seconds       = regexMatch.Groups["second"].Value;
-                    extensionPart = regexMatch.Groups["ext"].Value;
-                    sb = new StringBuilder(64);
-                    sb.Append(fileNamePart);
-                    sb.Append(year);   sb.Append(HYPHEN);
-                    sb.Append(month);  sb.Append(HYPHEN);
-                    sb.Append(day);    sb.Append(" ");
-                    sb.Append(hour);   sb.Append(HYPHEN);
-                    sb.Append(minute); sb.Append(HYPHEN);
-                    sb.Append(seconds);
-                    sb.Append(extensionPart);
-                    newFileName = sb.ToString();
+                folderPath  = Path.GetDirectoryName(e.FullPath) ?? string.Empty;
+                oldFileName = Path.GetFileName(e.FullPath);
+                newFileName = ProduceNewFileName(oldFileName);
+                if (!string.Equals(oldFileName, newFileName)) { 
                     newFilePath = Path.Combine(folderPath, newFileName);
-                    sb.Clear();
                     try {
                         File.Move(e.FullPath, newFilePath);
-                        mLogger.LogInformation("File '{0}' was renamed to '{1}'.", fileName, newFileName);
+                        mLogger.LogInformation("File '{0}' was renamed to '{1}'.", oldFileName, newFileName);
                     }
                     catch (FileNotFoundException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. File not found.", fileName, newFileName);
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. File not found.", oldFileName, newFileName);
                     }
                     catch (DirectoryNotFoundException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Directory not found.", fileName, newFileName);
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Directory not found.", oldFileName, newFileName);
                     }
                     catch (PathTooLongException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", fileName, newFileName);
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", oldFileName, newFileName);
                     }
                     catch (IOException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", fileName, newFileName, ex.HResult, ex.Message);
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", oldFileName, newFileName, ex.HResult, ex.Message);
+                        if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/) {
+                            oldFilePath = Path.Combine(folderPath, oldFileName);
+                            mPendingRenames.Enqueue(new Tuple<string, string>(oldFilePath, newFilePath));
+                        }
                     }
                     catch (ArgumentException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", fileName, newFileName, ex.Message);
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", oldFileName, newFileName, ex.Message);
                     }
                     catch (UnauthorizedAccessException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Could not access the file (unauthorized).", fileName, newFileName);
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Could not access the file (unauthorized).", oldFileName, newFileName);
                     }
                 } //end if regexMatch.Success
             } //end if e.ChangeType == Created

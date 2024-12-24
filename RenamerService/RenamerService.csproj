@@ -9,6 +9,10 @@
     <NuGetAuditLevel>high</NuGetAuditLevel>
     <SignAssembly>False</SignAssembly>
     <AnalysisLevel>none</AnalysisLevel>
+    <OutputType>Exe</OutputType>
+    
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
