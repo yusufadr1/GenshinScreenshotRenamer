@@ -263,11 +263,13 @@ namespace RenamerService {
                                     mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", oldFileName, newFileName);
                                 }
                                 catch (IOException ex) {
-                                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", oldFileName, newFileName, ex.HResult, ex.Message);
                                     if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/) {
                                         oldFilePath = Path.Combine(folderPath, oldFileName);
                                         mPendingRenames.Enqueue(new Tuple<string, string>(oldFilePath, newFilePath));
+                                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}', file is locked.", oldFileName, newFileName);
                                     }
+                                    else
+                                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", oldFileName, newFileName, ex.HResult, ex.Message);
                                 }
                                 catch (ArgumentException ex) {
                                     mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", oldFileName, newFileName, ex.Message);
@@ -314,9 +316,12 @@ namespace RenamerService {
                     mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", renameInstruction.Item1, renameInstruction.Item2);
                 }
                 catch (IOException ex) {
-                    mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", renameInstruction.Item1, renameInstruction.Item2, ex.HResult, ex.Message);
-                    if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/)
+                    if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/) { 
+                        mLogger.LogError(ex, "Still cannot rename file '{0}' into '{1}'. Sharing violation error - file is locked.", renameInstruction.Item1, renameInstruction.Item2);   
                         failedRenames.Add(renameInstruction);
+                    }
+                    else
+                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", renameInstruction.Item1, renameInstruction.Item2, ex.HResult, ex.Message);
                 }
                 catch (ArgumentException ex) {
                     mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", renameInstruction.Item1, renameInstruction.Item2, ex.Message);
@@ -344,7 +349,7 @@ namespace RenamerService {
         private void FSW_Created(object sender, FileSystemEventArgs e) {
             string folderPath, oldFileName, oldFilePath, newFileName, newFilePath;
             if (e.ChangeType == WatcherChangeTypes.Created && !string.IsNullOrEmpty(e.FullPath) && e.FullPath.Length > 0) {
-                folderPath  = Path.GetDirectoryName(e.FullPath) ?? string.Empty;
+                folderPath  = ((FileSystemWatcher)sender).Path;
                 oldFileName = Path.GetFileName(e.FullPath);
                 newFileName = ProduceNewFileName(oldFileName);
                 if (!string.Equals(oldFileName, newFileName)) { 
@@ -363,11 +368,13 @@ namespace RenamerService {
                         mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Path too long.", oldFileName, newFileName);
                     }
                     catch (IOException ex) {
-                        mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", oldFileName, newFileName, ex.HResult, ex.Message);
                         if ((ex.HResult & 0x0000FFFF) == 0x00000020 /*sharing violation error - file used by another process*/) {
+                            mLogger.LogInformation("Couldn't rename file '{0}' into '{1}', file is locked by another app. Will try again later.", oldFileName, newFileName);
                             oldFilePath = Path.Combine(folderPath, oldFileName);
                             mPendingRenames.Enqueue(new Tuple<string, string>(oldFilePath, newFilePath));
                         }
+                        else
+                            mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. 0x{2:X8}. {3}", oldFileName, newFileName, ex.HResult, ex.Message);
                     }
                     catch (ArgumentException ex) {
                         mLogger.LogError(ex, "Couldn't rename file '{0}' into '{1}'. Argument exception. {2}", oldFileName, newFileName, ex.Message);
